@@ -6,9 +6,11 @@ import 'package:safebite/entry/barcode.dart';
 import 'package:safebite/entry/profilescreen.dart';
 import 'package:safebite/entry/feedpage.dart';
 import 'package:safebite/entry/maps.dart';
+import 'package:safebite/entry/usersearch.dart';
 import 'package:safebite/entry/welcome.dart';
 import 'package:safebite/entry/changecreds.dart';
 import 'package:safebite/entry/profilescreen.dart';
+import 'package:safebite/rep/repsearchaccounts.dart';
 
 class NavBar extends StatefulWidget {
   int selectedIndex = 0;
@@ -68,10 +70,10 @@ class _NavBarState extends State<NavBar> {
               },
             ),
             GButton(
-              icon: Icons.menu_book,
-              text: "Students",
+              icon: Icons.search,
+              text: "Search",
               onPressed: () {
-                Navigator.popAndPushNamed(context, Barcode.id);
+                Navigator.popAndPushNamed(context, UserSearchPage.id);
               },
             ),
             GButton(
@@ -79,6 +81,13 @@ class _NavBarState extends State<NavBar> {
               text: "Maps",
               onPressed: () {
                 Navigator.popAndPushNamed(context, GoogleMapsScreen.id);
+              },
+            ),
+            GButton(
+              icon: Icons.qr_code,
+              text: "Scanner",
+              onPressed: () {
+                Navigator.popAndPushNamed(context, Barcode.id);
               },
             ),
             GButton(

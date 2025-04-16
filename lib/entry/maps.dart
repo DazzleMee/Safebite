@@ -1,10 +1,14 @@
 import 'dart:convert';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:http/http.dart' as http;
 import 'package:safebite/components/NavBar.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:safebite/entry/useraccountsearched.dart';
+import 'dart:math';
 
 class GoogleMapsScreen extends StatefulWidget {
   static const String id = "map_screen";
@@ -17,13 +21,21 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
   LatLng _currentLocation = const LatLng(37.7749, -122.4194);
   final TextEditingController _searchController = TextEditingController();
   Set<Marker> _markers = {};
-  String apiKey =
-      "AIzaSyAAi8LGNdXJrGSdlZo6O5vzIfM74smSK1s"; // Replace with your actual key
+  String apiKey = "AIzaSyAAi8LGNdXJrGSdlZo6O5vzIfM74smSK1s";
+  User? currentUser = FirebaseAuth.instance.currentUser;
+  List<String> userAllergens = [];
+  final FocusNode _searchFocusNode = FocusNode();
+  bool _isLoading = false;
+  List<Map<String, dynamic>> _recommendedRestaurants = [];
+  bool _showRecommendedCard = false;
 
   @override
   void initState() {
     super.initState();
     _determinePosition();
+    _fetchUserAllergens();
+
+    // Remove the listener from _searchFocusNode
   }
 
   Future<void> _determinePosition() async {
@@ -36,6 +48,7 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
       });
       if (_mapController != null) {
         _moveCameraToPosition(_currentLocation);
+        debugNearbyRestaurants(position.latitude, position.longitude);
       }
     } else {
       print("Location permission denied.");
@@ -46,6 +59,93 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
     _mapController?.animateCamera(CameraUpdate.newCameraPosition(
       CameraPosition(target: position, zoom: 14.0),
     ));
+  }
+
+  double calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    const double R = 6371; // Radius of Earth in KM
+    double dLat = (lat2 - lat1) * pi / 180;
+    double dLon = (lon2 - lon1) * pi / 180;
+    double a = sin(dLat / 2) * sin(dLat / 2) +
+        cos(lat1 * pi / 180) *
+            cos(lat2 * pi / 180) *
+            sin(dLon / 2) *
+            sin(dLon / 2);
+    double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+    return R * c; // Distance in KM
+  }
+
+  Future<List<Map<String, dynamic>>> fetchNearbyRestaurants(
+      double userLat, double userLon) async {
+    CollectionReference reps = FirebaseFirestore.instance.collection('rep');
+    QuerySnapshot snapshot = await reps.get();
+
+    List<Map<String, dynamic>> nearbyRestaurants = [];
+
+    for (var doc in snapshot.docs) {
+      var data = doc.data() as Map<String, dynamic>;
+
+      if (data.containsKey('business_location') &&
+          data['business_location'] != null) {
+        GeoPoint location = data['business_location'];
+        double restaurantLat = location.latitude;
+        double restaurantLon = location.longitude;
+
+        double distance =
+            calculateDistance(userLat, userLon, restaurantLat, restaurantLon);
+
+        Map<String, dynamic> allergenData = await _fetchAllergenFriendliness(
+            LatLng(restaurantLat, restaurantLon));
+        List<String> restaurantTags =
+            List<String>.from(allergenData['allergens'] ?? []);
+
+        bool matchesUserAllergens =
+            restaurantTags.any((tag) => userAllergens.contains(tag));
+
+        print("${data['business_name']} Distance: $distance km");
+        print("Restaurant: ${data['business_name']} Tags: $restaurantTags");
+        print("User Allergens: $userAllergens");
+        print(
+            "Match: ${restaurantTags.any((tag) => userAllergens.contains(tag))}");
+
+        if (distance <= 10 && matchesUserAllergens) {
+          String? placeId =
+              data.containsKey('place_id') && data['place_id'] is String
+                  ? data['place_id']
+                  : doc.id; // Use Firestore doc ID as a fallback
+
+          nearbyRestaurants.add({
+            'name': data['business_name'],
+            'latitude': restaurantLat,
+            'longitude': restaurantLon,
+            'distance': distance,
+            'tags': restaurantTags,
+            'place_id': placeId, // Ensure `place_id` is always a String
+          });
+
+          print(
+              "Restaurant Added: ${data['business_name']} with place_id: $placeId"); // Add this line
+        }
+      }
+    }
+    return nearbyRestaurants;
+  }
+
+  Future<void> debugNearbyRestaurants(double userLat, double userLon) async {
+    List<Map<String, dynamic>> restaurants =
+        await fetchNearbyRestaurants(userLat, userLon);
+
+    if (restaurants.isEmpty) {
+      print("No nearby restaurants found within 10km.");
+      return;
+    }
+
+    print("Nearby Restaurants within 10km:");
+    for (var restaurant in restaurants) {
+      print("🏠 Name: ${restaurant['name']}");
+      print("📍 Distance: ${restaurant['distance'].toStringAsFixed(2)} km");
+      print("🍽️ Allergen-Friendly Tags: ${restaurant['tags']}");
+      print("--------------------------------------");
+    }
   }
 
   Future<void> _searchPlaces(String query) async {
@@ -82,6 +182,8 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
                   ),
                 );
                 _markers.add(marker);
+                print("ITS HEREEEEE");
+                print(place['place_id']);
 
                 if (_markers.isNotEmpty) {
                   _mapController?.animateCamera(CameraUpdate.newCameraPosition(
@@ -98,16 +200,178 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
         });
       } else {
         print("Error searching places: ${response.statusCode}");
-        // Handle error, e.g., show a snackbar
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error searching restaurants.')),
-        );
       }
     } catch (e) {
       print('Error during search: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error searching restaurants.')),
-      );
+    }
+  }
+
+  void _showRecommendedRestaurants() async {
+    List<Map<String, dynamic>> nearbyRestaurants = await fetchNearbyRestaurants(
+        _currentLocation.latitude, _currentLocation.longitude);
+
+    if (nearbyRestaurants.isEmpty) {
+      showModalBottomSheet(
+        context: context,
+        builder: (context) {
+          return Container(
+            color: Colors.black,
+            padding: EdgeInsets.all(16),
+            child: Text(
+              "No recommended restaurants available.",
+              style: TextStyle(color: Colors.white),
+            ),
+          );
+        },
+      )..whenComplete(() {
+          setState(() {
+            _showRecommendedCard = false;
+          });
+        });
+      return;
+    }
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.black,
+      builder: (context) {
+        return DraggableScrollableSheet(
+          initialChildSize: 0.6,
+          minChildSize: 0.6,
+          maxChildSize: 0.8,
+          expand: false,
+          builder: (context, scrollController) {
+            return Container(
+              padding: EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.black,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              child: ListView.separated(
+                controller: scrollController,
+                itemCount: nearbyRestaurants.length,
+                separatorBuilder: (context, index) => Divider(
+                  color: Colors.grey,
+                  height: 1,
+                ),
+                itemBuilder: (context, index) {
+                  final Map<String, dynamic> restaurant =
+                      nearbyRestaurants[index];
+                  return ListTile(
+                    title: Text(
+                      restaurant['name'] ?? 'Unknown',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          "Distance: ${restaurant['distance'].toStringAsFixed(2)} km",
+                          style: TextStyle(color: Colors.white),
+                        ),
+                        if (restaurant['tags'] != null &&
+                            restaurant['tags'].isNotEmpty)
+                          Wrap(
+                            spacing: 4,
+                            children: (restaurant['tags'] as List<String>)
+                                .map((tag) => Chip(
+                                      label: Text(tag,
+                                          style:
+                                              TextStyle(color: Colors.black)),
+                                      backgroundColor: Colors.white,
+                                    ))
+                                .toList(),
+                          )
+                        else
+                          Text(
+                            "No allergen info available",
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                      ],
+                    ),
+                    trailing: Icon(
+                      Icons.place,
+                      color: Colors.white,
+                    ),
+                    onTap: () async {
+                      if (_mapController != null) {
+                        LatLng restaurantLocation = LatLng(
+                          restaurant['latitude'],
+                          restaurant['longitude'],
+                        );
+                        _mapController?.animateCamera(
+                          CameraUpdate.newCameraPosition(
+                            CameraPosition(
+                              target: restaurantLocation,
+                              zoom: 18.0,
+                            ),
+                          ),
+                        );
+
+                        setState(() {
+                          _markers.clear();
+                          _markers.add(
+                            Marker(
+                              markerId: MarkerId(
+                                  restaurant['place_id'] is String
+                                      ? restaurant['place_id']
+                                      : restaurant['name']),
+                              position: restaurantLocation,
+                              infoWindow: InfoWindow(
+                                title: restaurant['name'],
+                                snippet: "Tap for details",
+                                onTap: () {
+                                  _searchPlaceDetailsByName(
+                                      restaurant['name'], restaurantLocation);
+                                },
+                              ),
+                            ),
+                          );
+                          print(
+                              "Restaurant Place ID: ${restaurant['place_id']}");
+                        });
+                      }
+                      Navigator.pop(context);
+                    },
+                  );
+                },
+              ),
+            );
+          },
+        );
+      },
+    )..whenComplete(() {
+        setState(() {
+          _showRecommendedCard = false;
+        });
+      });
+  }
+
+  Future<void> _searchPlaceDetailsByName(
+      String restaurantName, LatLng location) async {
+    String query = "$restaurantName restaurants";
+    String url =
+        "https://maps.googleapis.com/maps/api/place/textsearch/json?query=$query&location=${location.latitude},${location.longitude}&radius=5000&key=$apiKey";
+
+    try {
+      final response = await http.get(Uri.parse(url));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final places = data['results'];
+
+        if (places != null && places is List && places.isNotEmpty) {
+          String placeId = places[0]['place_id'];
+          _getPlaceDetails(placeId);
+        } else {
+          print("No matching place found for $restaurantName");
+        }
+      } else {
+        print("Error searching place: ${response.statusCode}");
+      }
+    } catch (e) {
+      print("Error searching place: $e");
     }
   }
 
@@ -128,11 +392,9 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
             if (time.length == 4) {
               int hours = int.parse(time.substring(0, 2));
               int minutes = int.parse(time.substring(2));
-              String amPm = hours < 12 || hours == 24
-                  ? 'AM'
-                  : 'PM'; // Handle midnight (24:00)
-              hours = hours % 12; // Convert to 12-hour format
-              hours = hours == 0 ? 12 : hours; // Handle midnight (00:00)
+              String amPm = hours < 12 || hours == 24 ? 'AM' : 'PM';
+              hours = hours % 12;
+              hours = hours == 0 ? 12 : hours;
               formattedTime =
                   "${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')} $amPm";
             }
@@ -149,63 +411,122 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
     }
   }
 
+  Future<void> _fetchUserAllergens() async {
+    if (currentUser == null) return;
+
+    final userDoc = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(currentUser!.uid)
+        .get();
+
+    setState(() {
+      userAllergens = (userDoc.data()?['allergens'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          [];
+      print(userAllergens);
+    });
+  }
+
   Future<void> _getPlaceDetails(String placeId) async {
     String url =
-        "https://maps.googleapis.com/maps/api/place/details/json?place_id=$placeId&key=$apiKey&fields=name,formatted_address,formatted_phone_number,website,rating,review,photos,opening_hours"; // Add photos to the fields
+        "https://maps.googleapis.com/maps/api/place/details/json?place_id=$placeId&key=$apiKey&fields=name,geometry,formatted_address,opening_hours,rating,photos";
 
     try {
       final response = await http.get(Uri.parse(url));
-      print("sucess");
-      final data = json.decode(response.body);
-      print("sucess");
-      final placeDetails = data['result'];
-      print("sucess");
-
-      print("Full JSON Response: ${response.body}");
-
-      String? imageUrl;
-      if (placeDetails['photos'] != null &&
-          placeDetails['photos'] is List &&
-          placeDetails['photos'].isNotEmpty) {
-        final photos = placeDetails['photos'] as List;
-        final firstPhoto = photos[0] as Map<String, dynamic>;
-        if (firstPhoto['photo_reference'] != null) {
-          final photoReference = firstPhoto['photo_reference'] as String;
-          imageUrl =
-              "https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photoreference=$photoReference&key=$apiKey";
-          print("Image URL: $imageUrl");
-        }
-      }
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         final placeDetails = data['result'];
 
-        // Show the details in a dialog, bottom sheet, or other UI element
-        _showPlaceDetailsCard(placeDetails, imageUrl);
+        if (placeDetails['geometry'] != null &&
+            placeDetails['geometry']['location'] != null) {
+          final location = placeDetails['geometry']['location'];
+          final latLng = LatLng(location['lat'], location['lng']);
+
+          print(
+              "Selected Place LatLng: ${latLng.latitude}, ${latLng.longitude}");
+
+          Map<String, dynamic> allergenData =
+              await _fetchAllergenFriendliness(latLng);
+          List<String> allergenTags =
+              List<String>.from(allergenData['allergens'] ?? []);
+
+          String? imageUrl;
+          if (placeDetails['photos'] != null &&
+              (placeDetails['photos'] as List).isNotEmpty) {
+            String photoReference =
+                placeDetails['photos'][0]['photo_reference'];
+            imageUrl =
+                "https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photoreference=$photoReference&key=$apiKey";
+          }
+
+          _showPlaceDetailsCard(
+              placeDetails, imageUrl, allergenTags, allergenData);
+        }
       } else {
         print("Error getting place details: ${response.statusCode}");
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error fetching restaurant details.')),
-        );
       }
     } catch (e) {
       print('Error getting place details: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error fetching restaurant details.')),
-      );
     }
   }
 
-  void _showPlaceDetailsCard(Map<String, dynamic> details, String? imageUrl) {
+  Future<Map<String, dynamic>> _fetchAllergenFriendliness(LatLng latLng) async {
+    try {
+      double lat = latLng.latitude;
+      double lng = latLng.longitude;
+      double range = 0.001;
+
+      QuerySnapshot repSnapshot =
+          await FirebaseFirestore.instance.collection('rep').get();
+
+      List<QueryDocumentSnapshot> matchingReps = repSnapshot.docs.where((doc) {
+        GeoPoint geoPoint = doc['business_location']; // GeoPoint object
+        double docLat = geoPoint.latitude;
+        double docLng = geoPoint.longitude;
+
+        return (docLat >= lat - range && docLat <= lat + range) &&
+            (docLng >= lng - range && docLng <= lng + range);
+      }).toList();
+
+      if (matchingReps.isNotEmpty) {
+        String businessName = matchingReps.first['business_name'];
+        String businessEmail = matchingReps.first['email'];
+
+        QuerySnapshot postsSnapshot = await FirebaseFirestore.instance
+            .collection('posts')
+            .where('business_name', isEqualTo: businessName)
+            .get();
+
+        Set<String> allergens = {};
+        for (var post in postsSnapshot.docs) {
+          allergens.addAll(List<String>.from(post['tags'] ?? []));
+        }
+
+        return {
+          'allergens': allergens.toSet().toList(),
+          'hasProfile': true,
+          'businessName': businessName,
+          'email': businessEmail,
+        };
+      }
+    } catch (e) {
+      print("Error fetching allergen friendliness: $e");
+    }
+    return {'allergens': [], 'hasProfile': false};
+  }
+
+  void _showPlaceDetailsCard(Map<String, dynamic> details, String? imageUrl,
+      List<String> allergenTags, Map<String, dynamic> allergenData) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       builder: (context) {
         return DraggableScrollableSheet(
-          initialChildSize: 0.4, // Adjust as needed
+          initialChildSize: 0.4,
           minChildSize: 0.4,
-          maxChildSize: 0.8, // Adjust as needed
+          maxChildSize: 0.8,
           expand: false,
           builder: (context, scrollController) {
             return Container(
@@ -228,20 +549,17 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
                               fontSize: 20, fontWeight: FontWeight.bold)),
                       IconButton(
                         icon: Icon(Icons.close),
-                        onPressed: () => Navigator.pop(context), // Close button
+                        onPressed: () => Navigator.pop(context),
                       ),
                     ],
                   ),
                   SizedBox(height: 8),
-
                   if (imageUrl != null)
                     Image.network(
                       imageUrl,
                       height: 200,
                       width: double.infinity,
                       fit: BoxFit.cover,
-                      errorBuilder: (context, object, stackTrace) =>
-                          Center(child: Icon(Icons.image_not_supported)),
                     )
                   else
                     Center(
@@ -250,25 +568,39 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
                         color: Colors.grey,
                       ),
                     ),
-
                   SizedBox(height: 16),
-
-                  _buildRatingStars(details['rating']), // Dynamic rating stars
-
+                  _buildRatingStars(details['rating']),
+                  if (allergenTags.isNotEmpty)
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                          minimumSize: Size(80, 10),
+                          padding:
+                              EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                          textStyle: TextStyle(fontSize: 17)),
+                      onPressed: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => UserAccountSearched(
+                              businessAccountEmail: allergenData['email'],
+                            ),
+                          ),
+                        );
+                      },
+                      child: Text("View Profile"),
+                    ),
                   SizedBox(height: 16),
-
                   Text("Allergen Friendliness",
                       style: TextStyle(fontWeight: FontWeight.bold)),
                   SizedBox(height: 8),
-                  // Use Wrap to handle multiple tags
                   Wrap(
                     spacing: 8,
                     runSpacing: 4,
-                    children: [
-                      Chip(label: Text("Vegan")),
-                      Chip(label: Text("Vegetarian")),
-                      Chip(label: Text("Gluten Free")),
-                    ],
+                    children: allergenTags.isNotEmpty
+                        ? allergenTags
+                            .map((tag) => Chip(label: Text(tag)))
+                            .toList()
+                        : [Chip(label: Text("No allergen data available"))],
                   ),
                   SizedBox(height: 16),
                   Row(
@@ -276,7 +608,6 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
                       Icon(Icons.location_on),
                       SizedBox(width: 8),
                       Expanded(
-                        // Use Expanded to prevent overflow
                         child: Text(details['formatted_address'] ?? "N/A"),
                       ),
                     ],
@@ -289,27 +620,6 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
                       Text(getOpeningStatusAndTime(details)),
                     ],
                   ),
-                  if (details['review'] != null)
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text("Reviews:",
-                            style: TextStyle(fontWeight: FontWeight.bold)),
-                        for (var review in details['review'])
-                          Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 4.0),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(review['author_name'],
-                                    style:
-                                        TextStyle(fontWeight: FontWeight.bold)),
-                                Text(review['text']),
-                              ],
-                            ),
-                          ),
-                      ],
-                    ),
                 ],
               ),
             );
@@ -341,43 +651,8 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
     return Row(children: stars);
   }
 
-  void _showRatingDialog(String restaurantName) {
-    showModalBottomSheet(
-      context: context,
-      builder: (context) {
-        return Container(
-          padding: EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text("Rate $restaurantName",
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              SizedBox(height: 10),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(5, (index) {
-                  return IconButton(
-                    icon: Icon(Icons.star, color: Colors.amber),
-                    onPressed: () {
-                      Navigator.pop(context);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                            content: Text(
-                                "You rated $restaurantName ${index + 1} stars!")),
-                      );
-                    },
-                  );
-                }),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
   void _onMapCreated(GoogleMapController controller) {
-    _mapController = controller; // Assign the controller
+    _mapController = controller;
   }
 
   @override
@@ -385,7 +660,7 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
     return Scaffold(
       bottomNavigationBar: NavBar(selectedIndex: 2),
       appBar: AppBar(
-        title: Center(child: Text("Find & Rate Restaurants")),
+        title: Center(child: Text("Find Restaurants")),
         automaticallyImplyLeading: false,
       ),
       body: Stack(
@@ -402,21 +677,48 @@ class _GoogleMapsScreenState extends State<GoogleMapsScreen> {
             top: 10,
             left: 20,
             right: 20,
-            child: Container(
-              padding: EdgeInsets.symmetric(horizontal: 12),
-              decoration: BoxDecoration(
-                  color: Colors.grey, borderRadius: BorderRadius.circular(8)),
-              child: TextField(
-                controller: _searchController,
-                decoration: InputDecoration(
-                  hintText: "Search restaurants",
-                  border: InputBorder.none,
-                  suffixIcon: IconButton(
-                    icon: Icon(Icons.search),
-                    onPressed: () => _searchPlaces(_searchController.text),
+            child: Column(
+              children: [
+                Container(
+                  padding: EdgeInsets.symmetric(horizontal: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[900], // Match the background color
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: TextField(
+                    controller: _searchController,
+                    style: TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      hintText: "Search accounts",
+                      hintStyle: TextStyle(color: Colors.white54),
+                      border: InputBorder.none, // Removes default border
+                      suffixIcon: IconButton(
+                        icon: Icon(Icons.search, color: Colors.white),
+                        onPressed: () => _searchPlaces(_searchController.text),
+                      ),
+                    ),
+                    onTap: () {
+                      setState(() {
+                        _showRecommendedCard = true;
+                      });
+                    },
                   ),
                 ),
-              ),
+                Visibility(
+                  visible: _showRecommendedCard,
+                  child: Card(
+                    child: ListTile(
+                      title: Text("Recommended"),
+                      onTap: () {
+                        setState(() {
+                          _showRecommendedCard = false;
+                        });
+                        _showRecommendedRestaurants();
+                      },
+                    ),
+                  ),
+                )
+              ],
             ),
           ),
         ],

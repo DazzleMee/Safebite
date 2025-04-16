@@ -23,6 +23,10 @@ class _AllergenpickerState extends State<Allergenpicker> {
     "Vegan": false,
     "Vegetarian": false,
     "Peanut": false,
+    "Dairy": false,
+    "Soy": false,
+    "Peanuts": false,
+    "Fish": false,
     "None": false,
   };
 
@@ -50,8 +54,20 @@ class _AllergenpickerState extends State<Allergenpicker> {
         .map((entry) => entry.key)
         .toList();
 
-    await _firestore.collection('users').doc(user.uid).update(
-        {'allergens': selectedAllergens, 'profilePic': defaultImageUrl});
+    if (selectedAllergens.isEmpty) {
+      selectedAllergens = ["None"];
+    }
+
+    await _firestore.collection('users').doc(user.uid).update({
+      'allergens': selectedAllergens,
+      'profilePic': defaultImageUrl,
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Allergens saved!")),
+      );
+    }
 
     print("Saved allergens: $selectedAllergens");
   }
@@ -59,7 +75,7 @@ class _AllergenpickerState extends State<Allergenpicker> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[200],
+      backgroundColor: Colors.grey[900],
       appBar: AppBar(
         automaticallyImplyLeading: false,
         title: Text("Pick Your Allergens"),
